@@ -1,26 +1,24 @@
 import streamlit as st
-from openai import OpenAI
+from groq import Groq
 
-st.set_page_config(page_title="BizInsights", page_icon="📊", layout="centered")
-
+st.set_page_config(page_title="BizInsights", page_icon="📊")
 st.title("BizInsights")
-st.write("Ask a question and get insights.")
+st.write("Ask a question and get an answer powered by Groq.")
 
-# (Optional) upload a file if your original app used one
-uploaded_file = st.file_uploader("Upload a CSV (optional)", type=["csv"])
+# Optional: upload a CSV if you plan to parse data later
+uploaded = st.file_uploader("Upload a CSV (optional)", type=["csv"])
 
-prompt = st.text_area("Your question")
+question = st.text_area("Your question")
 
 if st.button("Ask"):
-    if not prompt.strip():
+    if not question.strip():
         st.warning("Please type a question.")
     else:
         try:
-            client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-            msg = [{"role": "user", "content": prompt}]
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
             resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=msg,
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": question}],
             )
             st.write(resp.choices[0].message.content)
         except Exception as e:
