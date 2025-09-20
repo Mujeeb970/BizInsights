@@ -7,4 +7,5 @@ tldextract
 pandas
 lxml
 python-dotenv
+streamlit
 feedparser
