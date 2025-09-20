@@ -350,7 +350,7 @@ with st.sidebar:
     per_domain = st.slider("Per-domain limit", 1, 4, PER_DOMAIN_LIMIT_DEFAULT)
     include_academia = st.checkbox("Include academic sources (OpenAlex, arXiv, Crossref)", value=True)
     st.markdown("---")
-    st.markdown("**Secrets status:** " + ("✅ Found GROQ_API_KEY" if (st.secrets.get('GROQ_API_KEY') or os.environ.get('GROQ_API_KEY')) else "❌ Missing GROQ_API_KEY"))
+    # st.markdown("**Secrets status:** " + ("✅ Found GROQ_API_KEY" if (st.secrets.get('GROQ_API_KEY') or os.environ.get('GROQ_API_KEY')) else "❌ Missing GROQ_API_KEY"))
 
 topic = st.text_input("Your prompt / topic", value="", placeholder="e.g., NHS AI adoption metrics in 2024; UK EV charging policy; Cybersecurity in autonomous vehicles")
 run = st.button("Run")
@@ -402,3 +402,4 @@ if run:
 
     except Exception as e:
         log(f"❌ Error: {e}")
+
