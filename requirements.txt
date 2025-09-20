@@ -1,0 +1,10 @@
+groq
+ddgs
+httpx
+beautifulsoup4
+readability-lxml
+tldextract
+pandas
+lxml
+python-dotenv
+feedparser
