@@ -340,7 +340,7 @@ def run_pipeline(topic:str, region:str, per_domain_limit:int, max_sources:int, i
 
 # =================== STREAMLIT UI ===================
 st.set_page_config(page_title="BizInsights", page_icon="📊", layout="centered")
-st.title("BizInsights — Research & Evidence Generator")
+st.title("Research & Evidence Generator")
 st.caption("Web + Academic search • Stats-first report • Evidence table CSV")
 
 with st.sidebar:
@@ -402,4 +402,5 @@ if run:
 
     except Exception as e:
         log(f"❌ Error: {e}")
+
 
