@@ -1,15 +1,14 @@
-# app.py — BizInsights (Streamlit, shareable link, private code)
-# - Uses your existing pipeline (web + academic search, Groq models)
-# - Reads GROQ_API_KEY from Streamlit Secrets (fallback to env)
-# - Saves report on server AND offers user-side downloads (Markdown + CSV)
+# app.py — BizInsights
+# Web + academic research using Groq
+# Generates a Markdown report + downloadable CSV evidence table
 
 import os
 import re
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from io import StringIO, BytesIO
+from io import StringIO
+from urllib.parse import quote
 
 import streamlit as st
 import httpx
@@ -18,8 +17,8 @@ import feedparser
 from bs4 import BeautifulSoup
 from readability import Document
 from groq import Groq
+import tldextract
 
-# Optional libs you already use
 try:
     from ddgs import DDGS
 except ImportError:
@@ -27,10 +26,10 @@ except ImportError:
         "Missing ddgs. Add 'ddgs' to requirements.txt and redeploy."
     )
 
-import tldextract
 
-
-# =================== CONFIG ===================
+# ============================================================
+# CONFIG
+# ============================================================
 
 REGION_DEFAULT = "wt-wt"
 MAX_SOURCES_DEFAULT = 24
@@ -38,14 +37,14 @@ PER_DOMAIN_LIMIT_DEFAULT = 2
 FETCH_CONCURRENCY = 8
 REQUEST_TIMEOUT = 25
 
-# UPDATED GROQ MODELS
+# Current Groq models
 DEFAULT_MODEL_PRIMARY = "openai/gpt-oss-120b"
 DEFAULT_MODEL_FALLBACK = "openai/gpt-oss-20b"
 
 MODEL_TEMPERATURE = 0.1
 
 
-# Server-side report folder
+# Folder used by Streamlit server
 DOWNLOADS = Path.home() / "Downloads"
 REPORT_DIR = DOWNLOADS / "BusinessInsightsReports"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -107,8 +106,9 @@ BLOCKLIST_PARTIALS = [
 ]
 
 
-# ==============================================
-
+# ============================================================
+# HELPERS
+# ============================================================
 
 def now_london():
     return (
@@ -131,11 +131,9 @@ def domain_name(url: str):
         ext = tldextract.extract(url)
 
         return ".".join(
-            [
-                p
-                for p in [ext.domain, ext.suffix]
-                if p
-            ]
+            p
+            for p in [ext.domain, ext.suffix]
+            if p
         ).lower()
 
     except Exception:
@@ -154,14 +152,12 @@ def web_search_text(
     out = []
 
     with DDGS() as ddg:
-
         for r in ddg.text(
             query,
             max_results=max_results,
             safesearch="moderate",
             region=region
         ):
-
             out.append(
                 {
                     "title": r.get("title"),
@@ -171,31 +167,28 @@ def web_search_text(
                 }
             )
 
-    # Deduplicate URLs
+    # Remove duplicate URLs
     seen = set()
     dedup = []
 
     for r in out:
+        url = r.get("url")
 
-        u = r.get("url")
-
-        if u and u not in seen:
-
-            seen.add(u)
+        if url and url not in seen:
+            seen.add(url)
             dedup.append(r)
 
     return dedup
 
 
 # ============================================================
-# ACADEMIC SEARCH — OPENALEX
+# OPENALEX
 # ============================================================
 
 def search_openalex(
     query: str,
     max_results: int = 15
 ):
-
     url = "https://api.openalex.org/works"
 
     params = {
@@ -207,99 +200,59 @@ def search_openalex(
     out = []
 
     try:
+        with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+            response = client.get(url, params=params)
 
-        with httpx.Client(
-            timeout=REQUEST_TIMEOUT
-        ) as s:
-
-            r = s.get(
-                url,
-                params=params
-            )
-
-            if r.status_code != 200:
+            if response.status_code != 200:
                 return out
 
-            for w in r.json().get(
-                "results",
-                []
-            ):
+            for work in response.json().get("results", []):
 
-                title = w.get("title")
+                title = work.get("title")
 
-                pub = (
-                    w.get(
-                        "host_venue",
-                        {}
-                    ).get(
-                        "display_name"
-                    )
-                    or ""
+                primary_location = (
+                    work.get("primary_location") or {}
+                )
+
+                source = (
+                    primary_location.get("source") or {}
+                )
+
+                publication = (
+                    source.get("display_name") or ""
                 )
 
                 year = (
-                    w.get(
-                        "publication_year"
-                    )
-                    or ""
+                    work.get("publication_year") or ""
                 )
 
-                loc = (
-                    w.get(
-                        "open_access",
-                        {}
-                    ).get(
-                        "oa_url"
-                    )
-                    or
-                    (
-                        w.get(
-                            "primary_location",
-                            {}
-                        )
-                        or {}
-                    )
-                    .get(
-                        "source",
-                        {}
-                    )
-                    .get(
-                        "home_page_url"
-                    )
-                    or
-                    w.get(
-                        "primary_location",
-                        {}
-                    ).get(
-                        "landing_page_url"
-                    )
-                    or
-                    w.get("id")
+                open_access = (
+                    work.get("open_access") or {}
                 )
 
-                abstract = w.get(
+                location = (
+                    open_access.get("oa_url")
+                    or primary_location.get("landing_page_url")
+                    or source.get("homepage_url")
+                    or work.get("id")
+                )
+
+                abstract = work.get(
                     "abstract_inverted_index"
                 )
 
-                snippet = (
-                    " ".join(
-                        sorted(
-                            abstract.keys()
-                        )[:60]
+                if isinstance(abstract, dict):
+                    snippet = " ".join(
+                        list(abstract.keys())[:60]
                     )
-                    if isinstance(
-                        abstract,
-                        dict
-                    )
-                    else pub
-                )
+                else:
+                    snippet = publication
 
-                if loc:
-
+                if location:
                     out.append(
                         {
                             "title": title,
-                            "url": loc,
+                            "url": location,
                             "snippet": snippet,
                             "date": str(year),
                         }
@@ -312,18 +265,14 @@ def search_openalex(
 
 
 # ============================================================
-# ARXIV SEARCH
+# ARXIV
 # ============================================================
 
 def search_arxiv(
     query: str,
     max_results: int = 12
 ):
-
     try:
-
-        from urllib.parse import quote
-
         encoded_query = quote(query)
 
         api = (
@@ -338,42 +287,29 @@ def search_arxiv(
 
         out = []
 
-        for e in feed.entries:
+        for entry in feed.entries:
 
             title = (
-                e.get(
-                    "title",
-                    ""
-                )
-                .replace(
-                    "\n",
-                    " "
-                )
+                entry.get("title", "")
+                .replace("\n", " ")
                 .strip()
             )
 
-            link = e.get("link")
+            link = entry.get("link")
 
             summary = (
-                e.get(
-                    "summary",
-                    ""
-                )
-                .replace(
-                    "\n",
-                    " "
-                )
+                entry.get("summary", "")
+                .replace("\n", " ")
                 .strip()
             )
 
             date = (
-                e.get("updated")
-                or e.get("published")
+                entry.get("updated")
+                or entry.get("published")
                 or ""
             )[:10]
 
             if link:
-
                 out.append(
                     {
                         "title": title,
@@ -386,19 +322,17 @@ def search_arxiv(
         return out
 
     except Exception:
-
         return []
 
 
 # ============================================================
-# CROSSREF SEARCH
+# CROSSREF
 # ============================================================
 
 def search_crossref(
     query: str,
     max_results: int = 12
 ):
-
     url = "https://api.crossref.org/works"
 
     params = {
@@ -410,108 +344,78 @@ def search_crossref(
     out = []
 
     try:
-
         with httpx.Client(
             timeout=REQUEST_TIMEOUT,
             headers={
                 "User-Agent":
-                "BizInsights/1.2 (research application)"
-            },
-        ) as s:
+                "BizInsights/1.3 research application"
+            }
+        ) as client:
 
-            r = s.get(
+            response = client.get(
                 url,
                 params=params
             )
 
-            if r.status_code != 200:
+            if response.status_code != 200:
                 return out
 
             items = (
-                r.json()
-                .get(
-                    "message",
-                    {}
-                )
-                .get(
-                    "items",
-                    []
-                )
+                response.json()
+                .get("message", {})
+                .get("items", [])
             )
 
-            for it in items:
+            for item in items:
 
                 title = " ".join(
-                    it.get("title")
-                    or []
+                    item.get("title") or []
                 )[:300]
 
-                url_primary = None
+                primary_url = None
 
-                for li in it.get(
-                    "link",
-                    []
-                ):
-
-                    if li.get("URL"):
-
-                        url_primary = li["URL"]
+                for link in item.get("link", []):
+                    if link.get("URL"):
+                        primary_url = link["URL"]
                         break
 
-                if not url_primary:
+                if not primary_url:
+                    primary_url = item.get("URL")
 
-                    url_primary = (
-                        it.get("URL")
-                        or (
-                            f"https://doi.org/{it.get('DOI')}"
-                            if it.get("DOI")
-                            else None
-                        )
+                if (
+                    not primary_url
+                    and item.get("DOI")
+                ):
+                    primary_url = (
+                        f"https://doi.org/{item['DOI']}"
                     )
 
                 date_parts = (
-                    it.get(
-                        "issued",
-                        {}
-                    )
-                    .get(
-                        "date-parts",
-                        [[]]
-                    )
+                    item.get("issued", {})
+                    .get("date-parts", [[]])
                 )
 
                 year = ""
 
-                if (
-                    date_parts
-                    and date_parts[0]
-                ):
-                    year = str(
-                        date_parts[0][0]
-                    )
+                if date_parts and date_parts[0]:
+                    year = str(date_parts[0][0])
 
-                pub = (
-                    it.get(
-                        "container-title"
-                    )
+                publication = (
+                    item.get("container-title")
                     or [""]
                 )[0]
 
                 snippet = (
-                    pub
-                    or
-                    it.get(
-                        "publisher"
-                    )
+                    publication
+                    or item.get("publisher")
                     or ""
                 )
 
-                if url_primary:
-
+                if primary_url:
                     out.append(
                         {
                             "title": title,
-                            "url": url_primary,
+                            "url": primary_url,
                             "snippet": snippet,
                             "date": year,
                         }
@@ -524,12 +428,10 @@ def search_crossref(
 
 
 # ============================================================
-# FETCH WEB PAGE
+# FETCH AND CLEAN WEB PAGE
 # ============================================================
 
-def fetch_and_clean_single(
-    url: str
-):
+def fetch_and_clean_single(url: str):
 
     headers = {
         "User-Agent":
@@ -537,21 +439,18 @@ def fetch_and_clean_single(
     }
 
     try:
-
         with httpx.Client(
             timeout=REQUEST_TIMEOUT,
             follow_redirects=True,
             headers=headers
-        ) as s:
+        ) as client:
 
-            r = s.get(url)
+            response = client.get(url)
+            response.raise_for_status()
 
-            r.raise_for_status()
-
-            html = r.text
+            html = response.text
 
     except Exception as e:
-
         return {
             "url": url,
             "title": None,
@@ -560,7 +459,6 @@ def fetch_and_clean_single(
         }
 
     try:
-
         doc = Document(html)
 
         title = doc.short_title()
@@ -571,11 +469,7 @@ def fetch_and_clean_single(
         )
 
         for tag in soup(
-            [
-                "script",
-                "style",
-                "noscript",
-            ]
+            ["script", "style", "noscript"]
         ):
             tag.decompose()
 
@@ -596,7 +490,6 @@ def fetch_and_clean_single(
         }
 
     except Exception as e:
-
         return {
             "url": url,
             "title": None,
@@ -609,44 +502,34 @@ def fetch_and_clean_single(
 # SOURCE RANKING
 # ============================================================
 
-def quality_score(
-    url: str
-):
+def quality_score(url: str):
 
-    d = domain_name(url)
-
+    domain = domain_name(url)
     score = 0
 
-    for k, w in QUALITY_WEIGHTS.items():
+    for key, weight in QUALITY_WEIGHTS.items():
 
         if (
-            d.endswith(
-                k.replace(
-                    "*",
-                    ""
-                )
+            domain.endswith(
+                key.replace("*", "")
             )
-            or
-            k in d
+            or key in domain
         ):
-
             score = max(
                 score,
-                w
+                weight
             )
 
     return score
 
 
-def is_blocked(
-    url: str
-):
+def is_blocked(url: str):
 
-    u = url.lower()
+    url = url.lower()
 
     return any(
-        b in u
-        for b in BLOCKLIST_PARTIALS
+        blocked in url
+        for blocked in BLOCKLIST_PARTIALS
     )
 
 
@@ -658,20 +541,20 @@ def choose_top_sources(
 
     ranked = []
 
-    for r in results:
+    for result in results:
 
-        u = r.get("url")
+        url = result.get("url")
 
-        if not u:
+        if not url:
             continue
 
-        if is_blocked(u):
+        if is_blocked(url):
             continue
 
         ranked.append(
             (
-                quality_score(u),
-                r
+                quality_score(url),
+                result
             )
         )
 
@@ -681,28 +564,24 @@ def choose_top_sources(
     )
 
     kept = []
-    used = {}
+    used_domains = {}
 
-    for _, r in ranked:
+    for _, result in ranked:
 
-        d = domain_name(
-            r["url"]
+        domain = domain_name(
+            result["url"]
         )
 
-        used[d] = used.get(
-            d,
-            0
+        used_domains[domain] = (
+            used_domains.get(domain, 0)
         )
 
         if (
-            used[d]
-            <
-            per_domain_limit
+            used_domains[domain]
+            < per_domain_limit
         ):
-
-            kept.append(r)
-
-            used[d] += 1
+            kept.append(result)
+            used_domains[domain] += 1
 
         if len(kept) >= max_total:
             break
@@ -711,58 +590,80 @@ def choose_top_sources(
 
 
 # ============================================================
-# SYSTEM INSTRUCTIONS
+# MODEL INSTRUCTIONS
 # ============================================================
 
 BUSINESS_SYSTEM_INSTRUCTIONS = """
-You are BusinessResearcher, a neutral analyst.
+You are BusinessResearcher, a neutral research analyst.
 
-Use only the numbered web sources provided.
+IMPORTANT RULES:
 
-Do not invent citations, statistics, sources, or URLs.
+1. Use only the numbered sources provided.
+2. Never invent citations.
+3. Never invent URLs.
+4. Never invent statistics.
+5. Do not present a number unless it is supported by the supplied evidence.
+6. Clearly identify uncertainty and missing evidence.
+7. Prefer authoritative government, academic, standards-body and reputable institutional sources.
+8. Every important factual claim should have a citation such as [1], [2] or [3].
+9. Whenever numbers exist, include the value, unit, year/date and citation.
+10. Do not claim a source says something unless the supplied source text supports it.
 
-Write for senior decision-makers.
+Write a structured, evidence-based report.
 
-Be clear, structured, evidence-based and statistics-first.
-
-Whenever numbers exist, ALWAYS include:
-- value
-- unit
-- year/date where available
-- citation [n]
-
-Output structure:
+Use this exact overall structure:
 
 ## Key Metrics at a Glance
-Provide 5–10 important metrics where supported by the evidence.
+
+Provide 5–10 important metrics where evidence supports them.
+
+Use a Markdown table with:
+
+| # | Metric | Value | Unit | Year / Date | Source |
+
+Do not force 10 metrics when the evidence does not contain enough reliable numbers.
 
 ## Executive Summary
-Provide 6–10 concise evidence-based bullets.
+
+Provide 6–10 concise evidence-based points with citations.
 
 ## Evidence Table
 
-Use:
+IMPORTANT:
+Produce this as a proper Markdown table.
+
+Use these exact columns:
 
 | # | Source | Publisher | Date | Key finding | URL |
+|---|---|---|---|---|---|
 
-Include approximately 10–25 useful sources where available.
+Include approximately 10–25 useful sources when available.
+
+Only include sources actually provided to you.
+
+Do not include sources whose content could not be meaningfully verified unless clearly marked.
 
 ## 5Rs Analysis
 
 ### Rules
-Explain relevant policies, laws, regulations, standards and governance.
+
+Relevant laws, policies, regulations, standards and governance.
 
 ### Roles
-Explain important organisations, stakeholders and responsibilities.
+
+Relevant organisations, stakeholders and responsibilities.
 
 ### Relationships
-Explain connections between stakeholders and systems.
+
+Relationships and dependencies between stakeholders.
 
 ### Resources
-Explain financial, human, technical and organisational resources.
+
+Financial, human, technical and organisational resources.
 
 ### Results
-Explain measured results, outcomes, trends and performance.
+
+Measured results, outcomes and trends.
 
 ## Feedback Loops
 
@@ -770,40 +671,38 @@ Explain important positive or negative feedback loops.
 
 ## Enablers
 
-Explain factors enabling success.
+Factors enabling progress or success.
 
 ## Barriers
 
-Explain factors preventing or slowing success.
+Factors preventing or slowing progress.
 
 ## Consensus vs Disagreements
 
-Clearly separate areas where evidence agrees from areas where
-sources differ.
+Explain where the evidence agrees and where it differs.
 
 ## Limits & Unknowns
 
-Explain missing data, uncertainty and limitations.
+Clearly describe data gaps, uncertainty, weak evidence and limitations.
 
 ## How to Verify
 
 Explain how important findings could independently be checked.
 
-After the main report output a CSV block exactly between:
+At the END of the report, also produce a CSV version of the Evidence Table.
+
+The CSV MUST appear exactly between these tags:
 
 <CSV>
-
-and
-
+#,[Source Title],Publisher,Date,One-line finding,URL
+...
 </CSV>
 
-CSV columns:
+Do not put Markdown formatting inside the CSV block.
 
-#,[Source Title],Publisher,Date,One-line finding,URL
+Quote CSV fields when necessary.
 
-Use approximately 10–25 important rows where available.
-
-Quote CSV fields if necessary.
+The CSV must contain approximately 10–25 rows where suitable.
 """
 
 
@@ -828,74 +727,74 @@ def build_business_prompt(
     )
 
     lines.append(
-        "\nFollow the structure and style "
-        "in the system instructions exactly."
+        "\nFollow the system instructions exactly."
     )
 
     lines.append(
-        "\nSources (numbered):"
+        "\nNUMBERED SOURCES:"
     )
 
-    for i, src in enumerate(
+    for i, source in enumerate(
         fetched,
         1
     ):
 
         title = (
-            src.get("title")
+            source.get("title")
             or "(no title)"
         )
 
-        url = src["url"]
+        url = source.get("url", "")
 
         date = (
-            src.get("date")
+            source.get("date")
             or ""
         )
 
-        entry = (
+        line = (
             f"[{i}] {title} — {url}"
         )
 
         if date:
+            line += f" ({date})"
 
-            entry += (
-                f" ({date})"
-            )
-
-        lines.append(entry)
+        lines.append(line)
 
     lines.append(
-        "\nShort excerpts "
-        "from sources for grounding:"
+        "\nSOURCE EXCERPTS:"
     )
 
-    for i, src in enumerate(
+    for i, source in enumerate(
         fetched,
         1
     ):
 
-        txt = (
-            src.get("text")
+        text = (
+            source.get("text")
+            or source.get("snippet")
             or ""
-        )[:1400]
+        )[:1800]
 
         lines.append(
-            f"\nFrom source [{i}] "
-            f"— {src.get('title') or '(no title)'}:\n"
-            f"{txt}\n"
+            f"\nSOURCE [{i}]\n"
+            f"Title: "
+            f"{source.get('title') or '(no title)'}\n"
+            f"URL: {source.get('url', '')}\n"
+            f"Content:\n{text}\n"
         )
 
     lines.append(
         """
-After the main report, output a compact CSV block between
-<CSV>...</CSV>.
+IMPORTANT:
+End the report with the CSV evidence table between:
 
-Columns:
+<CSV>
 
-#,[Source Title],Publisher,Date,One-line finding,URL
+and
 
-Use 10–25 of the most important rows where possible.
+</CSV>
+
+Do not omit these tags.
 """
     )
 
@@ -903,7 +802,7 @@ Use 10–25 of the most important rows where possible.
 
 
 # ============================================================
-# GROQ MODEL CALL
+# GROQ CALL
 # ============================================================
 
 def ask_groq(
@@ -930,6 +829,185 @@ def ask_groq(
 
 
 # ============================================================
+# CSV EXTRACTION
+# ============================================================
+
+def extract_csv_block(text: str):
+
+    match = re.search(
+        r"<CSV>\s*(.*?)\s*</CSV>",
+        text,
+        flags=re.DOTALL | re.IGNORECASE
+    )
+
+    if not match:
+        return None
+
+    csv_raw = match.group(1).strip()
+
+    if not csv_raw:
+        return None
+
+    try:
+        df = pd.read_csv(
+            StringIO(csv_raw)
+        )
+
+        if df.empty:
+            return None
+
+        return df
+
+    except Exception:
+        return None
+
+
+def markdown_evidence_table_to_df(
+    text: str
+):
+
+    """
+    Fallback:
+    Extract the Markdown Evidence Table if the
+    model forgot to produce a valid CSV block.
+    """
+
+    section_match = re.search(
+        r"(?:^|\n)##?\s*Evidence Table\s*\n"
+        r"(.*?)(?=\n##?\s+|\n5Rs Analysis|\Z)",
+        text,
+        flags=re.DOTALL | re.IGNORECASE
+    )
+
+    if not section_match:
+        return None
+
+    section = section_match.group(1)
+
+    table_lines = [
+        line.strip()
+        for line in section.splitlines()
+        if line.strip().startswith("|")
+        and line.strip().endswith("|")
+    ]
+
+    if len(table_lines) < 2:
+        return None
+
+    rows = []
+
+    for line in table_lines:
+
+        cells = [
+            cell.strip()
+            for cell in line.strip("|").split("|")
+        ]
+
+        # Ignore separator row:
+        # |---|---|---|
+        separator = all(
+            bool(
+                re.fullmatch(
+                    r":?-{3,}:?",
+                    cell.replace(" ", "")
+                )
+            )
+            for cell in cells
+        )
+
+        if separator:
+            continue
+
+        rows.append(cells)
+
+    if len(rows) < 2:
+        return None
+
+    header = rows[0]
+
+    data_rows = []
+
+    for row in rows[1:]:
+
+        if len(row) < len(header):
+            row = (
+                row
+                + [""] * (
+                    len(header) - len(row)
+                )
+            )
+
+        elif len(row) > len(header):
+
+            # Keep additional text within the final column
+            row = (
+                row[:len(header) - 1]
+                + [
+                    " | ".join(
+                        row[len(header) - 1:]
+                    )
+                ]
+            )
+
+        data_rows.append(row)
+
+    try:
+        df = pd.DataFrame(
+            data_rows,
+            columns=header
+        )
+
+        if df.empty:
+            return None
+
+        return df
+
+    except Exception:
+        return None
+
+
+def create_evidence_csv(
+    text: str,
+    csv_path: Path
+):
+
+    # Method 1:
+    # Use explicit model CSV block
+    df = extract_csv_block(text)
+
+    # Method 2:
+    # Convert Markdown Evidence Table
+    if df is None:
+        df = markdown_evidence_table_to_df(
+            text
+        )
+
+    if df is None:
+        return None
+
+    # Clean column names
+    df.columns = [
+        str(column)
+        .strip()
+        .replace("[", "")
+        .replace("]", "")
+        for column in df.columns
+    ]
+
+    df.to_csv(
+        csv_path,
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    csv_bytes = df.to_csv(
+        index=False
+    ).encode("utf-8-sig")
+
+    return csv_bytes
+
+
+# ============================================================
 # MAIN PIPELINE
 # ============================================================
 
@@ -939,30 +1017,25 @@ def run_pipeline(
     per_domain_limit: int,
     max_sources: int,
     include_academia: bool,
-    progress_cb=None,
+    progress_cb=None
 ):
 
-    # Read GROQ key
-    try:
+    # --------------------------------------------------------
+    # API KEY
+    # --------------------------------------------------------
 
+    try:
         api_key = (
-            st.secrets.get(
-                "GROQ_API_KEY"
-            )
-            or
-            os.environ.get(
-                "GROQ_API_KEY"
-            )
+            st.secrets.get("GROQ_API_KEY")
+            or os.environ.get("GROQ_API_KEY")
         )
 
     except Exception:
-
         api_key = os.environ.get(
             "GROQ_API_KEY"
         )
 
     if not api_key:
-
         raise RuntimeError(
             "No GROQ_API_KEY found. "
             "Go to Streamlit → Settings → Secrets "
@@ -971,11 +1044,10 @@ def run_pipeline(
 
 
     # --------------------------------------------------------
-    # Search web
+    # WEB SEARCH
     # --------------------------------------------------------
 
     if progress_cb:
-
         progress_cb(
             "Searching the web…"
         )
@@ -983,18 +1055,17 @@ def run_pipeline(
     base_hits = web_search_text(
         topic,
         max_results=max_sources * 3,
-        region=region,
+        region=region
     )
 
 
     # --------------------------------------------------------
-    # Academic search
+    # ACADEMIC SOURCES
     # --------------------------------------------------------
 
     if include_academia:
 
         if progress_cb:
-
             progress_cb(
                 "Adding academic sources "
                 "(OpenAlex, arXiv, Crossref)…"
@@ -1017,153 +1088,124 @@ def run_pipeline(
 
 
     if not base_hits:
-
         raise RuntimeError(
             "No results found. "
             "Try a broader query or "
-            "switch region to wt-wt."
+            "switch the region to wt-wt."
         )
 
 
     # --------------------------------------------------------
-    # Rank sources
+    # PICK BEST SOURCES
     # --------------------------------------------------------
 
     picked_meta = choose_top_sources(
         base_hits,
         per_domain_limit=per_domain_limit,
-        max_total=max_sources,
+        max_total=max_sources
     )
 
 
     # --------------------------------------------------------
-    # Fetch pages
+    # FETCH SOURCES
     # --------------------------------------------------------
 
     if progress_cb:
-
         progress_cb(
             f"Fetching "
             f"{len(picked_meta)} "
             f"sources in parallel…"
         )
 
-
     fetched = [
         None
     ] * len(picked_meta)
 
-
     with ThreadPoolExecutor(
         max_workers=FETCH_CONCURRENCY
-    ) as ex:
+    ) as executor:
 
         future_map = {
-            ex.submit(
+            executor.submit(
                 fetch_and_clean_single,
-                r["url"]
-            ): idx
+                result["url"]
+            ): index
 
-            for idx, r
-            in enumerate(
-                picked_meta
-            )
+            for index, result
+            in enumerate(picked_meta)
         }
-
 
         done_count = 0
 
-
-        for fut in as_completed(
+        for future in as_completed(
             future_map
         ):
 
-            idx = future_map[fut]
-
+            index = future_map[future]
 
             try:
-
-                info = fut.result()
+                info = future.result()
 
             except Exception as e:
-
                 info = {
                     "url":
-                    picked_meta[idx]["url"],
+                    picked_meta[index]["url"],
 
-                    "title":
-                    None,
+                    "title": None,
 
                     "text":
                     f"FETCH_ERROR: {e}",
 
-                    "ok":
-                    False,
+                    "ok": False,
                 }
 
-
-            meta = picked_meta[idx]
-
+            metadata = picked_meta[index]
 
             if not info.get("title"):
-
                 info["title"] = (
-                    meta.get("title")
+                    metadata.get("title")
                 )
 
-
             info["date"] = (
-                meta.get("date")
+                metadata.get("date")
             )
-
 
             info["snippet"] = (
-                meta.get("snippet")
+                metadata.get("snippet")
             )
 
-
-            fetched[idx] = info
-
+            fetched[index] = info
 
             done_count += 1
 
-
             if progress_cb and (
                 done_count
-                ==
-                len(picked_meta)
-                or
-                done_count % 2 == 0
+                == len(picked_meta)
+                or done_count % 2 == 0
             ):
-
                 progress_cb(
                     f"Fetched "
                     f"{done_count}/"
                     f"{len(picked_meta)}…"
                 )
 
-
-    # Remove empty entries
     fetched = [
-        x
-        for x in fetched
-        if x is not None
+        source
+        for source in fetched
+        if source is not None
     ]
 
 
     # --------------------------------------------------------
-    # Build prompt
+    # BUILD PROMPT
     # --------------------------------------------------------
 
     if progress_cb:
-
         progress_cb(
             "Preparing evidence…"
         )
 
-
     searched_when = now_london()
-
 
     prompt = build_business_prompt(
         topic,
@@ -1180,43 +1222,34 @@ def run_pipeline(
         api_key=api_key
     )
 
-
     if progress_cb:
-
         progress_cb(
-            f"Asking primary model "
+            "Asking primary model "
             f"({DEFAULT_MODEL_PRIMARY})…"
         )
 
-
     try:
-
-        resp = ask_groq(
+        response = ask_groq(
             client,
             DEFAULT_MODEL_PRIMARY,
-            prompt,
+            prompt
         )
-
 
     except Exception as primary_error:
 
         if progress_cb:
-
             progress_cb(
                 "Primary model failed. "
-                f"Trying fallback "
+                "Trying fallback "
                 f"({DEFAULT_MODEL_FALLBACK})…"
             )
 
-
         try:
-
-            resp = ask_groq(
+            response = ask_groq(
                 client,
                 DEFAULT_MODEL_FALLBACK,
-                prompt,
+                prompt
             )
-
 
         except Exception as fallback_error:
 
@@ -1224,18 +1257,19 @@ def run_pipeline(
                 "\n\nBoth Groq models failed.\n\n"
                 f"Primary model: "
                 f"{DEFAULT_MODEL_PRIMARY}\n"
-                f"Error: {primary_error}\n\n"
+                f"Error: "
+                f"{primary_error}\n\n"
                 f"Fallback model: "
                 f"{DEFAULT_MODEL_FALLBACK}\n"
-                f"Error: {fallback_error}\n\n"
-                "Please check that your GROQ_API_KEY "
-                "is valid and that these models are "
-                "enabled for your Groq project."
+                f"Error: "
+                f"{fallback_error}\n\n"
+                "Check your GROQ_API_KEY "
+                "and Groq model access."
             )
 
 
     text = (
-        resp
+        response
         .choices[0]
         .message
         .content
@@ -1243,26 +1277,38 @@ def run_pipeline(
 
 
     # --------------------------------------------------------
-    # Save Markdown
+    # FILE NAMES
     # --------------------------------------------------------
 
-    ts = datetime.now().strftime(
+    timestamp = datetime.now().strftime(
         "%Y%m%d-%H%M%S"
     )
-
 
     safe_topic = sanitize_filename(
         topic,
         90
     )
 
-
     md_path = (
         REPORT_DIR
         /
-        f"{ts}_{safe_topic}_BUSINESS_WEB.md"
+        f"{timestamp}_"
+        f"{safe_topic}_"
+        f"BUSINESS_WEB.md"
     )
 
+    csv_path = (
+        REPORT_DIR
+        /
+        f"{timestamp}_"
+        f"{safe_topic}_"
+        f"EvidenceTable.csv"
+    )
+
+
+    # --------------------------------------------------------
+    # SAVE MARKDOWN
+    # --------------------------------------------------------
 
     md_path.write_text(
         text,
@@ -1271,72 +1317,88 @@ def run_pipeline(
 
 
     # --------------------------------------------------------
-    # Extract CSV
+    # CREATE CSV
     # --------------------------------------------------------
 
-    m = re.search(
-        r"<CSV>(.*?)</CSV>",
-        text,
-        flags=(
-            re.DOTALL
-            |
-            re.IGNORECASE
+    if progress_cb:
+        progress_cb(
+            "Creating evidence CSV…"
         )
+
+    csv_bytes = create_evidence_csv(
+        text,
+        csv_path
     )
 
+    if csv_bytes is None:
 
-    csv_bytes = None
-    csv_path = None
+        # Extra reliable fallback:
+        # create evidence directly from fetched sources
 
+        fallback_rows = []
 
-    if m:
+        for i, source in enumerate(
+            fetched,
+            1
+        ):
 
-        csv_raw = (
-            m.group(1)
-            .strip()
-        )
-
-
-        try:
-
-            df = pd.read_csv(
-                StringIO(
-                    csv_raw
-                )
+            snippet = (
+                source.get("snippet")
+                or source.get("text")
+                or ""
             )
 
+            snippet = re.sub(
+                r"\s+",
+                " ",
+                snippet
+            )[:400]
 
-            csv_path = (
-                REPORT_DIR
-                /
-                f"{ts}_{safe_topic}_EvidenceTable.csv"
+            fallback_rows.append(
+                {
+                    "#": i,
+                    "Source Title":
+                    source.get("title")
+                    or "(no title)",
+
+                    "Publisher":
+                    domain_name(
+                        source.get("url", "")
+                    ),
+
+                    "Date":
+                    source.get("date")
+                    or "",
+
+                    "One-line finding":
+                    snippet,
+
+                    "URL":
+                    source.get("url")
+                    or "",
+                }
             )
 
+        if fallback_rows:
 
-            df.to_csv(
+            fallback_df = pd.DataFrame(
+                fallback_rows
+            )
+
+            fallback_df.to_csv(
                 csv_path,
                 index=False,
-                encoding="utf-8"
+                encoding="utf-8-sig"
             )
-
 
             csv_bytes = (
-                df.to_csv(
-                    index=False
-                )
-                .encode(
-                    "utf-8"
-                )
+                fallback_df
+                .to_csv(index=False)
+                .encode("utf-8-sig")
             )
 
-
-        except Exception:
-
-            csv_bytes = (
-                csv_raw.encode(
-                    "utf-8"
-                )
-            )
+        else:
+            csv_path = None
 
 
     return (
@@ -1348,7 +1410,7 @@ def run_pipeline(
 
 
 # ============================================================
-# STREAMLIT UI
+# STREAMLIT PAGE
 # ============================================================
 
 st.set_page_config(
@@ -1370,16 +1432,15 @@ st.caption(
 )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # SIDEBAR
-# ------------------------------------------------------------
+# ============================================================
 
 with st.sidebar:
 
     st.subheader(
         "Options"
     )
-
 
     region = st.selectbox(
         "Region",
@@ -1393,23 +1454,20 @@ with st.sidebar:
         index=0,
     )
 
-
     max_sources = st.slider(
         "Max sources",
-        6,
-        40,
-        MAX_SOURCES_DEFAULT,
+        min_value=6,
+        max_value=40,
+        value=MAX_SOURCES_DEFAULT,
         step=2,
     )
 
-
     per_domain = st.slider(
         "Per-domain limit",
-        1,
-        4,
-        PER_DOMAIN_LIMIT_DEFAULT,
+        min_value=1,
+        max_value=4,
+        value=PER_DOMAIN_LIMIT_DEFAULT,
     )
-
 
     include_academia = st.checkbox(
         "Include academic sources "
@@ -1417,15 +1475,12 @@ with st.sidebar:
         value=True,
     )
 
-
     st.markdown("---")
-
 
     st.caption(
         "Primary model: "
         f"{DEFAULT_MODEL_PRIMARY}"
     )
-
 
     st.caption(
         "Fallback model: "
@@ -1433,9 +1488,9 @@ with st.sidebar:
     )
 
 
-# ------------------------------------------------------------
-# INPUT
-# ------------------------------------------------------------
+# ============================================================
+# USER INPUT
+# ============================================================
 
 topic = st.text_input(
     "Your prompt / topic",
@@ -1454,40 +1509,34 @@ run = st.button(
 )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # OUTPUT AREAS
-# ------------------------------------------------------------
+# ============================================================
 
 log_area = st.empty()
-
 report_area = st.empty()
 
-md_download = st.empty()
+download_col1, download_col2 = (
+    st.columns(2)
+)
 
-csv_download = st.empty()
 
+# ============================================================
+# LOGGING
+# ============================================================
 
-# ------------------------------------------------------------
-# LOG FUNCTION
-# ------------------------------------------------------------
+def log(message):
 
-def log(msg):
-
-    prev = st.session_state.get(
+    previous = st.session_state.get(
         "log_text",
         ""
     )
 
-    st.session_state[
-        "log_text"
-    ] = (
-        prev
-        +
-        msg
-        +
-        "\n"
+    st.session_state["log_text"] = (
+        previous
+        + message
+        + "\n"
     )
-
 
     log_area.code(
         st.session_state[
@@ -1496,9 +1545,9 @@ def log(msg):
     )
 
 
-# ------------------------------------------------------------
-# RUN BUTTON
-# ------------------------------------------------------------
+# ============================================================
+# RUN
+# ============================================================
 
 if run:
 
@@ -1506,13 +1555,11 @@ if run:
         "log_text"
     ] = ""
 
-
     if not topic.strip():
 
         st.warning(
             "Please enter a topic first."
         )
-
 
     else:
 
@@ -1522,8 +1569,12 @@ if run:
                 "Starting research…"
             )
 
-
-            md_bytes, csv_bytes, md_path, csv_path = run_pipeline(
+            (
+                md_bytes,
+                csv_bytes,
+                md_path,
+                csv_path,
+            ) = run_pipeline(
                 topic=topic.strip(),
                 region=region,
                 per_domain_limit=per_domain,
@@ -1532,95 +1583,119 @@ if run:
                 progress_cb=log,
             )
 
-
             log(
                 "✅ Research completed."
             )
 
-
             log(
-                f"✅ Saved Markdown "
+                "✅ Saved Markdown "
                 f"on server: {md_path}"
             )
 
-
-            if csv_path:
+            if csv_path and csv_bytes:
 
                 log(
-                    f"✅ Saved CSV "
-                    f"on server: {csv_path}"
+                    "✅ Evidence CSV created."
                 )
 
             else:
 
                 log(
-                    "ℹ️ No CSV file was extracted. "
-                    "The Markdown report "
-                    "is still available."
+                    "⚠️ CSV could not be created."
                 )
 
 
-            # Show report on screen
+            # -----------------------------------------------
+            # DISPLAY REPORT
+            # -----------------------------------------------
+
             report_text = (
                 md_bytes.decode(
                     "utf-8"
                 )
             )
 
+            # Hide the raw <CSV> block from the
+            # on-screen report
+            display_report = re.sub(
+                r"<CSV>.*?</CSV>",
+                "",
+                report_text,
+                flags=(
+                    re.DOTALL
+                    |
+                    re.IGNORECASE
+                )
+            ).strip()
 
             report_area.markdown(
-                report_text
+                display_report
             )
 
 
-            # ------------------------------------------------
-            # Downloads
-            # ------------------------------------------------
+            # -----------------------------------------------
+            # DOWNLOAD FILE NAMES
+            # -----------------------------------------------
 
-            ts = datetime.now().strftime(
-                "%Y%m%d-%H%M%S"
+            timestamp = (
+                datetime.now()
+                .strftime(
+                    "%Y%m%d-%H%M%S"
+                )
             )
-
 
             safe_topic = sanitize_filename(
                 topic or "report",
                 60
             )
 
-
-            md_fname = (
-                f"{ts}_"
+            markdown_filename = (
+                f"{timestamp}_"
                 f"{safe_topic}_"
                 f"BUSINESS_WEB.md"
             )
 
-
-            md_download.download_button(
-                label=(
-                    "⬇️ Download "
-                    "Markdown report"
-                ),
-                data=md_bytes,
-                file_name=md_fname,
-                mime="text/markdown",
+            csv_filename = (
+                f"{timestamp}_"
+                f"{safe_topic}_"
+                f"EvidenceTable.csv"
             )
 
 
-            if csv_bytes:
+            # -----------------------------------------------
+            # MARKDOWN DOWNLOAD
+            # -----------------------------------------------
 
-                csv_download.download_button(
+            with download_col1:
+
+                st.download_button(
                     label=(
                         "⬇️ Download "
-                        "Evidence Table (CSV)"
+                        "Markdown Report"
                     ),
-                    data=csv_bytes,
-                    file_name=(
-                        f"{ts}_"
-                        f"{safe_topic}_"
-                        f"EvidenceTable.csv"
-                    ),
-                    mime="text/csv",
+                    data=md_bytes,
+                    file_name=markdown_filename,
+                    mime="text/markdown",
                 )
+
+
+            # -----------------------------------------------
+            # CSV DOWNLOAD
+            # -----------------------------------------------
+
+            if csv_bytes:
+
+                with download_col2:
+
+                    st.download_button(
+                        label=(
+                            "⬇️ Download "
+                            "Evidence Table (CSV)"
+                        ),
+                        data=csv_bytes,
+                        file_name=csv_filename,
+                        mime="text/csv",
+                    )
 
 
         except Exception as e:
